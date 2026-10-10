@@ -84,6 +84,41 @@ class ClaudeConfigManager:
         except IOError as e:
             print(f"写入配置文件失败: {e}", file=sys.stderr)
 
+    def edit_in_editor(self, data):
+        """在编辑器中打开JSON数据，返回解析后的结果；取消或出错时返回None"""
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as tmp_file:
+            json.dump(data, tmp_file, indent=2, ensure_ascii=False)
+            tmp_file_path = tmp_file.name
+
+        try:
+            editor = os.environ.get('EDITOR', 'vim')
+            subprocess.run([editor, tmp_file_path], check=True)
+
+            with open(tmp_file_path, 'r', encoding='utf-8') as f:
+                try:
+                    edited = json.load(f)
+                except json.JSONDecodeError as e:
+                    print(f"错误: 无效的JSON格式 - {e}", file=sys.stderr)
+                    return None
+
+            if not self.validate_json(edited):
+                print("错误: 配置格式无效", file=sys.stderr)
+                return None
+
+            return edited
+
+        except subprocess.CalledProcessError:
+            print("用户取消了编辑", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"编辑器操作出错: {e}", file=sys.stderr)
+            return None
+        finally:
+            try:
+                os.unlink(tmp_file_path)
+            except OSError:
+                pass
+
     def new_config(self, config_name):
         """创建新的配置"""
         if not config_name:
@@ -95,38 +130,32 @@ class ClaudeConfigManager:
             return
 
         template = self.configs.get("default", {})
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as tmp_file:
-            json.dump(template, tmp_file, indent=2, ensure_ascii=False)
-            tmp_file_path = tmp_file.name
+        new_config = self.edit_in_editor(template)
+        if new_config is None:
+            return
 
-        try:
-            editor = os.environ.get('EDITOR', 'vim')
-            subprocess.run([editor, tmp_file_path], check=True)
+        self.configs[config_name] = new_config
+        self.save_configs_to_file()
+        print(f"成功创建配置: {config_name}")
 
-            with open(tmp_file_path, 'r', encoding='utf-8') as f:
-                try:
-                    new_config = json.load(f)
-                except json.JSONDecodeError as e:
-                    print(f"错误: 无效的JSON格式 - {e}", file=sys.stderr)
-                    return
+    def edit_config(self, config_name):
+        """编辑已有配置的内容"""
+        if config_name not in self.configs:
+            print(f"错误: 配置 '{config_name}' 不存在", file=sys.stderr)
+            return
 
-            if not self.validate_json(new_config):
-                print("错误: 配置格式无效", file=sys.stderr)
-                return
+        original = self.configs[config_name]
+        edited = self.edit_in_editor(original)
+        if edited is None:
+            return
 
-            self.configs[config_name] = new_config
-            self.save_configs_to_file()
-            print(f"成功创建配置: {config_name}")
+        if json.dumps(edited, sort_keys=True) == json.dumps(original, sort_keys=True):
+            print(f"配置 '{config_name}' 未发生改动，未保存")
+            return
 
-        except subprocess.CalledProcessError:
-            print("用户取消了编辑", file=sys.stderr)
-        except Exception as e:
-            print(f"创建配置时出错: {e}", file=sys.stderr)
-        finally:
-            try:
-                os.unlink(tmp_file_path)
-            except OSError:
-                pass
+        self.configs[config_name] = edited
+        self.save_configs_to_file()
+        print(f"成功修改配置: {config_name}")
 
     def delete_config(self, config_name):
         """删除指定配置"""
@@ -216,6 +245,7 @@ HELP_TEXT = """命令:
   list                   列出所有可用的配置
   switch NAME            切换到指定的配置
   new NAME               创建新的配置
+  edit NAME              编辑已有配置
   import NAME            从 ~/.claude/settings.json 导入配置
   delete NAME            删除指定的配置
   peek NAME              查看指定配置内容
@@ -225,6 +255,7 @@ HELP_TEXT = """命令:
   python claude_switcher.py list
   python claude_switcher.py switch work
   python claude_switcher.py new home
+  python claude_switcher.py edit work
   python claude_switcher.py import current
   python claude_switcher.py delete temp
   python claude_switcher.py peek default
@@ -251,6 +282,9 @@ def main():
 
     new_p = subparsers.add_parser('new', help='创建新配置')
     new_p.add_argument('name', help='新配置名称')
+
+    edit_p = subparsers.add_parser('edit', help='编辑已有配置')
+    edit_p.add_argument('name', help='配置名称')
 
     import_p = subparsers.add_parser('import', help='从 ~/.claude/settings.json 导入配置')
     import_p.add_argument('name', help='新配置名称')
@@ -280,6 +314,8 @@ def main():
         manager.switch_config(args.name)
     elif args.command == 'new':
         manager.new_config(args.name)
+    elif args.command == 'edit':
+        manager.edit_config(args.name)
     elif args.command == 'import':
         manager.import_config(args.name)
     elif args.command == 'delete':
